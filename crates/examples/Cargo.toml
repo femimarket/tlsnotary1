@@ -5,6 +5,8 @@ publish = false
 version = "0.0.0"
 
 [dependencies]
+actix-web = "4"
+url = "2.5.2"
 notary-client = { workspace = true }
 tlsn-common = { workspace = true }
 tlsn-core = { workspace = true }
@@ -41,6 +43,10 @@ tracing-subscriber = { workspace = true }
 [[example]]
 name = "attestation_prove"
 path = "attestation/prove.rs"
+
+[[example]]
+name = "server"
+path = "attestation/server.rs"
 
 [[example]]
 name = "attestation_present"
