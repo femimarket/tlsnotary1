@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use url::Url;
 use actix_web::{web, App, HttpServer};
-use http_body_util::Empty;
+use http_body_util::{Empty, Full};
 use hyper::{body::Bytes, Request, StatusCode};
 use hyper_util::rt::TokioIo;
 use tokio_util::compat::{FuturesAsyncReadCompatExt, TokioAsyncReadCompatExt};
@@ -75,118 +75,43 @@ async fn prove_route(
 
 async fn prove(url:&str)  -> ProveResponse {
 
-    let url = Url::parse(url).unwrap();
+    use hyper::{Client, Request, Body};
+    use hyper::http::header::{ACCEPT_ENCODING, CONNECTION, AUTHORIZATION};
+    use hyper_tls::HttpsConnector;
+    use std::error::Error;
 
-    let (prover_socket, notary_socket) = tokio::io::duplex(1 << 16);
+    #[tokio::main]
+    async fn main() -> Result<(), Box<dyn Error>> {
+        // Create a new HTTPS client
+        let https = HttpsConnector::new();
+        let client = Client::builder().build::<_, hyper::Body>(https);
 
-    // Start a local simple notary service
-    tokio::spawn(run_notary(notary_socket.compat()));
+        // Build the request
+        let req = Request::builder()
+            .method("GET")
+            .uri("https://api-fxpractice.oanda.com/v3/accounts/101-004-5845779-004/trades")
+            .header(ACCEPT_ENCODING, "identity")
+            .header(CONNECTION, "close")
+            .header(AUTHORIZATION, "Bearer 3487192cc456d1584a5ba92ebc2692bf-bffe1410087f02fa96fbb13df93d2b59")
+            .body(Body::empty())?;
 
-    // Prover configuration.
-    let config = ProverConfig::builder()
-        .server_name(url.host_str().unwrap())
-        .protocol_config(
-            ProtocolConfig::builder()
-                // We must configure the amount of data we expect to exchange beforehand, which will
-                // be preprocessed prior to the connection. Reducing these limits will improve
-                // performance.
-                .max_sent_data(1024)
-                .max_recv_data(16384)
-                .build()
-                .unwrap(),
-        )
-        .build()
-        .unwrap();
+        // Send the request and wait for the response
+        let resp = client.request(req).await?;
 
-    // Create a new prover and perform necessary setup.
-    let prover = Prover::new(config).setup(prover_socket.compat()).await.unwrap();
+        // Print the response status
+        println!("Response status: {}", resp.status());
 
-    // Open a TCP connection to the server.
-    let client_socket = tokio::net::TcpStream::connect((url.host_str().unwrap(), 443)).await.unwrap();
+        // Print the response headers
+        println!("Response headers: {:#?}", resp.headers());
 
-    // Bind the prover to the server connection.
-    // The returned `mpc_tls_connection` is an MPC TLS connection to the server: all
-    // data written to/read from it will be encrypted/decrypted using MPC with
-    // the notary.
-    let (mpc_tls_connection, prover_fut) = prover.connect(client_socket.compat()).await.unwrap();
-    let mpc_tls_connection = TokioIo::new(mpc_tls_connection.compat());
+        // Get the response body
+        let body_bytes = hyper::body::to_bytes(resp.into_body()).await?;
+        let body = String::from_utf8(body_bytes.to_vec())?;
 
-    // Spawn the prover task to be run concurrently in the background.
-    let prover_task = tokio::spawn(prover_fut);
+        // Print the response body
+        println!("Response body: {}", body);
 
-    // Attach the hyper HTTP client to the connection.
-    let (mut request_sender, connection) =
-        hyper::client::conn::http1::handshake(mpc_tls_connection).await.unwrap();
-
-    // Spawn the HTTP task to be run concurrently in the background.
-    tokio::spawn(connection);
-
-    // Build a simple HTTP request with common headers
-    let request = Request::builder()
-        .uri(url.path())
-        .header("Host", url.host_str().unwrap())
-        .header("Accept", "*/*")
-        // Using "identity" instructs the Server not to use compression for its HTTP response.
-        // TLSNotary tooling does not support compression.
-        .header("Accept-Encoding", "identity")
-        .header("Content-Type", "application/json")
-        .header("Authorization", format!("Bearer {}", "3487192cc456d1584a5ba92ebc2692bf-bffe1410087f02fa96fbb13df93d2b59"))
-        .header("Connection", "close")
-        .header("User-Agent", USER_AGENT)
-        .body(Empty::<Bytes>::new())
-        .unwrap();
-
-    println!("Starting an MPC TLS connection with the server");
-
-    // Send the request to the server and wait for the response.
-    let response = request_sender.try_send_request(request).await.unwrap();
-
-    println!("Got a response from the server");
-
-    assert!(response.status() == StatusCode::OK);
-
-    // The prover task should be done now, so we can await it.
-    let prover = prover_task.await.unwrap().unwrap();
-
-    // Prepare for notarization.
-    let mut prover = prover.start_notarize();
-
-    // Parse the HTTP transcript.
-    let transcript = HttpTranscript::parse(prover.transcript()).unwrap();
-
-    // Commit to the transcript.
-    let mut builder = TranscriptCommitConfig::builder(prover.transcript());
-
-    DefaultHttpCommitter::default().commit_transcript(&mut builder, &transcript).unwrap();
-
-    prover.transcript_commit(builder.build().unwrap());
-
-    // Request an attestation.
-    let config = RequestConfig::default();
-
-    let (attestation, secrets) = prover.finalize(&config).await.unwrap();
-
-    let attestation_bytes = serde_json::to_vec(&attestation).unwrap();
-    let secrets_bytes = serde_json::to_vec(&secrets).unwrap();
-    // Write the attestation to disk.
-    // tokio::fs::write(
-    //     "example.attestation.tlsn",
-    //     bincode::serialize(&attestation).unwrap(),
-    // )
-    //     .await.unwrap();
-
-    // Write the secrets to disk.
-    // tokio::fs::write("example.secrets.tlsn", bincode::serialize(&secrets).unwrap()).await.unwrap();
-
-    println!("Notarization completed successfully!");
-    println!(
-        "The attestation has been written to `example.attestation.tlsn` and the \
-        corresponding secrets to `example.secrets.tlsn`."
-    );
-
-    ProveResponse {
-        secret:secrets_bytes,
-        attestation: attestation_bytes,
+        Ok(())
     }
 
 }

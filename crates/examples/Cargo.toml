@@ -5,6 +5,7 @@ publish = false
 version = "0.0.0"
 
 [dependencies]
+hyper-tls = "0.6.0"
 actix-web = "4"
 url = "2.5.2"
 notary-client = { workspace = true }
@@ -55,6 +56,10 @@ path = "attestation/present.rs"
 [[example]]
 name = "attestation_verify"
 path = "attestation/verify.rs"
+
+[[example]]
+name = "hype"
+path = "attestation/hype.rs"
 
 [[example]]
 name = "interactive"
